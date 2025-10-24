@@ -1,5 +1,5 @@
-# plugins/rsave.py
-from .. import ultroid_cmd
+# addons/rsave.py
+from pyUltroid import ultroid_cmd  # Use absolute import
 
 @ultroid_cmd(pattern="rsave")
 async def rsave(event):
@@ -12,7 +12,7 @@ async def rsave(event):
     current = target
     while current:
         chain.append(current)
-        replied = await current.get_reply_message()  # Fixed: Use get_reply_message()
+        replied = await current.get_reply_message()
         if replied:
             current = replied
         else:
