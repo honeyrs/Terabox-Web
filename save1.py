@@ -1,6 +1,6 @@
-# /root/TeamUltroid/addons/save.py
-from pyUltroid.fns.tools import ultroid_cmd  # Correct import
-from . import eod  # Assuming eod is defined in addons/__init__.py or elsewhere
+# /root/TeamUltroid/addons/save (1).py
+from pyUltroid.fns.tools import ultroid_bot as ultroid_cmd  # Alias ultroid_bot to ultroid_cmd
+from pyUltroid.fns.helper import eod  # Ensure eod is imported correctly
 
 async def get_reply_chain(message, client):
     """Recursively collect all messages in the reply chain."""
