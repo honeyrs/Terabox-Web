@@ -1,49 +1,36 @@
-# /root/TeamUltroid/addons/save.py
-from pyUltroid.fns.tools import ultroid_cmd  # Adjust if in another module
-from pyUltroid.fns.helper import eod
+from telethon import events
+from telethon.tl.types import Message
+from ultroid.utils import udB, admin_cmd, edit_delete, reply_id
 
-async def get_reply_chain(message, client):
-    """Recursively collect all messages in the reply chain."""
-    chain = []
-    current_message = message
-    
-    while current_message and current_message.reply_to_message_id:
-        chain.append(current_message)
-        try:
-            current_message = await client.get_messages(
-                current_message.chat_id,
-                current_message.reply_to_message_id
-            )
-        except Exception as error:
-            print(f"Error fetching reply: {error}")
-            break
-    
-    if current_message and current_message not in chain:
-        chain.append(current_message)
-    
-    return chain
+SAVED_MSGS = udB.get_key("SAVED_MSGS") or "me"
 
-@ultroid_cmd(pattern="rsave", fullsudo=True)
-async def save_reply_chain(e):
-    """Forwards the replied message and its reply chain to Saved Messages."""
-    if not e.reply_to:
-        return await eod(e, "`Please reply to a message to save it and its reply chain to Saved Messages.`")
+@ultroid_cmd(pattern="savethread")
+async def savethread(event):
+    if not event.is_reply:
+        await edit_delete(event, "__Reply to a message to save its thread!__")
+        return
+    reply_to_id = await reply_id(event)
+    messages_to_save = [await event.get_reply_message()]
+    async for reply in event.client.iter_messages(event.chat_id, reply_to=reply_to_id):
+        messages_to_save.append(reply)
+    
+    if len(messages_to_save) == 1:
+        await edit_delete(event, "__No replies found in this thread.__")
+        return
+    
+    messages_to_save.reverse()  # Chronological order: original first, then replies
+    await event.edit(f"Saving {len(messages_to_save)} messages from thread...")
     
     try:
-        replied_message = await e.get_reply_message()
-        reply_chain = await get_reply_chain(replied_message, e.client)
-        
-        if not reply_chain:
-            return await eod(e, "`No messages found in the reply chain.`")
-        
-        me = await e.client.get_me()
-        for msg in reversed(reply_chain):
-            await e.client.forward_messages(
-                entity=me,
-                messages=msg
-            )
-        
-        await eod(e, f"`Successfully forwarded {len(reply_chain)} message(s) to Saved Messages!`")
-    
-    except Exception as error:
-        await eod(e, f"**Error:** `{error}`")
+        for msg in messages_to_save:
+            await event.client.forward_messages(SAVED_MSGS, msg)
+        await edit_delete(event, f"__Thread saved to Saved Messages! ({len(messages_to_save)} msgs)__")
+    except Exception as e:
+        await edit_delete(event, f"__Error saving thread: {str(e)}__")
+
+CMD_HELP.update(
+    {
+        "savethread": f"**Plugin for:** \
+        \n\n • **`.savethread`** to save a message and its replies (thread) to Saved Messages."
+    }
+)
