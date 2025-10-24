@@ -1,17 +1,6 @@
-# Ultroid - UserBot
-# Copyright (C) 2020 TeamUltroid
-#
-# This file is a part of < https://github.com/TeamUltroid/Ultroid/ >
-# Please read the GNU Affero General Public License in
-# <https://www.github.com/TeamUltroid/Ultroid/blob/main/LICENSE/>.
-
-"""
-✘ Commands Available -
-• `{i}rsave`
-    Forwards the replied message and all messages in its reply chain to your Saved Messages.
-"""
-
-from . import ultroid_cmd
+# /root/TeamUltroid/addons/save.py
+from pyUltroid.fns.tools import ultroid_cmd  # Correct import
+from . import eod  # Assuming eod is defined in addons/__init__.py or elsewhere
 
 async def get_reply_chain(message, client):
     """Recursively collect all messages in the reply chain."""
@@ -21,17 +10,14 @@ async def get_reply_chain(message, client):
     while current_message and current_message.reply_to_message_id:
         chain.append(current_message)
         try:
-            # Fetch the message that the current message is replying to
             current_message = await client.get_messages(
                 current_message.chat_id,
                 current_message.reply_to_message_id
             )
         except Exception as error:
-            # Break if there's an error fetching the replied message
             print(f"Error fetching reply: {error}")
             break
     
-    # Append the last message if it exists and wasn't already added
     if current_message and current_message not in chain:
         chain.append(current_message)
     
@@ -44,25 +30,19 @@ async def save_reply_chain(e):
         return await eod(e, "`Please reply to a message to save it and its reply chain to Saved Messages.`")
     
     try:
-        # Get the replied message
         replied_message = await e.get_reply_message()
-        
-        # Get the entire reply chain
         reply_chain = await get_reply_chain(replied_message, e.client)
         
         if not reply_chain:
             return await eod(e, "`No messages found in the reply chain.`")
         
-        # Forward each message in the reply chain to Saved Messages
-        # Reverse the chain to forward in chronological order (earliest first)
         me = await e.client.get_me()
         for msg in reversed(reply_chain):
             await e.client.forward_messages(
-                entity=me,  # Send to self (Saved Messages)
+                entity=me,
                 messages=msg
             )
         
-        # Respond with success message and delete the command message
         await eod(e, f"`Successfully forwarded {len(reply_chain)} message(s) to Saved Messages!`")
     
     except Exception as error:
