@@ -1,7 +1,19 @@
 # addons/rsave.py
-from pyUltroid import ultroid_cmd  # Use absolute import
+# < Source - t.me/testingpluginnn >
+# < Made for Ultroid by @Spemgod! >
+# < https://github.com/TeamUltroid/Ultroid >
 
-@ultroid_cmd(pattern="rsave")
+"""
+✘ **Save a reply chain to Saved Messages!**
+
+• **CMD:**
+>  `{i}rsave`
+> Reply to a message to forward its entire reply chain to your Saved Messages.
+"""
+
+from . import ultroid_cmd  # Relative import, similar to fwdl.py
+
+@ultroid_cmd(pattern="rsave$")
 async def rsave(event):
     target = await event.get_reply_message()
     if not target:
