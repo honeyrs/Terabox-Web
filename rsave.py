@@ -12,7 +12,7 @@
 > Example: `{i}rsave -1003138571490` or `{i}rsave @channelusername`
 """
 
-from pyUltroid.utils import ultroid_cmd  # Absolute import
+from . import ultroid_cmd  # Absolute import
 import asyncio
 
 @ultroid_cmd(pattern="rsave(?: (.*))?$")
