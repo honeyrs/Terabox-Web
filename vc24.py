@@ -1,5 +1,5 @@
 """
-VC Player – addons version
+VC Player – addons version (pytgcalls v4+)
 Commands:
   .play      → queue & play (reply to audio/video/document)
   .playlist  → show queue + current track
@@ -16,33 +16,42 @@ from . import ultroid_cmd, vcClient, getLogger
 log = getLogger(__name__)
 
 # ----------------------------------------------------------------------
-# py-tgcalls latest API
-from pytgcalls import GroupCallFactory
-from pytgcalls.mtproto_client_type import MTProtoClientType
-from pytgcalls.implementation.group_call_file import GroupCallFileAction
+# pytgcalls v4+ API
+from pytgcalls import PyTgCalls
+from pytgcalls import StreamType
+from pytgcalls.types import AudioVideoPiped
 
 # ----------------------------------------------------------------------
 # Global objects
-group_call_factory = GroupCallFactory(
-    vcClient, mtproto_backend=MTProtoClientType.PYROGRAM
-)
+client = PyTgCalls(vcClient)
 queues: defaultdict[int, deque] = defaultdict(deque)
 current: dict[int, dict] = {}
+running: set[int] = set()  # Track active calls
+
+# Start the client
+asyncio.create_task(client.start())
 
 # ----------------------------------------------------------------------
-async def _on_ended(chat_id: int, path: str):
-    """Clean up ended track and play next if available."""
-    try:
-        os.remove(path)
-    except Exception:
-        pass
-    current.pop(chat_id, None)
+async def _on_stream_end(chat_id: int):
+    """Called when stream ends"""
+    if chat_id in current:
+        path = current[chat_id]["path"]
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        current.pop(chat_id, None)
+
     if queues[chat_id]:
         await _play_next(chat_id)
+    else:
+        running.discard(chat_id)
 
 # ----------------------------------------------------------------------
 async def _play_next(chat_id: int, msg: Message | None = None):
-    """Play next track in queue."""
+    if chat_id in running:
+        return  # Already playing
+
     if not queues[chat_id]:
         return
 
@@ -50,22 +59,39 @@ async def _play_next(chat_id: int, msg: Message | None = None):
     path = track["path"]
     title = track["title"]
 
-    def ended_callback(gc):
-        loop = asyncio.get_event_loop()
-        loop.create_task(_on_ended(chat_id, path))
+    # Mark as running
+    running.add(chat_id)
 
-    group_call = group_call_factory.get_file_group_call(input_filename=path)
-    group_call.set_on_action(GroupCallFileAction.PLAYOUT_ENDED, ended_callback)
+    # Update current
+    current[chat_id] = {"path": path, "title": title}
 
-    current[chat_id] = {
-        "group_call": group_call,
-        "title": title,
-        "path": path,
-    }
+    try:
+        await client.join_group_call(
+            chat_id,
+            AudioVideoPiped(
+                path,
+                audio_parameters={
+                    "bit_rate": 48000,
+                },
+                video_parameters=None,  # Set to None if no video
+            ),
+            stream_type=StreamType().pulse_stream,
+        )
 
-    await group_call.start(chat_id)
-    if msg:
-        await msg.edit(f"**Now playing:** `{title}`")
+        if msg:
+            await msg.edit(f"**Now playing:** `{title}`")
+
+        # Wait for stream to end
+        while chat_id in current and client.is_connected(chat_id):
+            await asyncio.sleep(1)
+
+        await _on_stream_end(chat_id)
+
+    except Exception as e:
+        log.error(f"Error playing {path}: {e}")
+        await _on_stream_end(chat_id)
+        if msg:
+            await msg.edit("**Failed to play track.**")
 
 # ----------------------------------------------------------------------
 @ultroid_cmd(pattern="play")
@@ -95,8 +121,8 @@ async def play_cmd(event: Message):
     await event.edit(f"**Queued:** `{title}`")
 
     # Start playing if not already
-    if chat_id not in current:
-        await _play_next(chat_id, event)
+    if chat_id not in running:
+        asyncio.create_task(_play_next(chat_id, event))
 
 # ----------------------------------------------------------------------
 @ultroid_cmd(pattern="playlist")
@@ -122,16 +148,24 @@ async def skip_cmd(event: Message):
     if chat_id not in current:
         return await event.edit("**Nothing is playing.**")
 
-    curr = current[chat_id]
-    await curr["group_call"].stop()
     try:
-        os.remove(curr["path"])
+        await client.leave_group_call(chat_id)
     except Exception:
         pass
-    current.pop(chat_id, None)
 
-    await _play_next(chat_id, event)
+    path = current[chat_id]["path"]
+    try:
+        os.remove(path)
+    except Exception:
+        pass
+
+    current.pop(chat_id, None)
+    running.discard(chat_id)
+
     await event.edit("**Skipped.**")
+
+    if queues[chat_id]:
+        asyncio.create_task(_play_next(chat_id, event))
 
 # ----------------------------------------------------------------------
 @ultroid_cmd(pattern="stop")
@@ -140,13 +174,19 @@ async def stop_cmd(event: Message):
 
     # Stop current
     if chat_id in current:
-        curr = current[chat_id]
-        await curr["group_call"].leave_current_group_call()
         try:
-            os.remove(curr["path"])
+            await client.leave_group_call(chat_id)
         except Exception:
             pass
+
+        path = current[chat_id]["path"]
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
         current.pop(chat_id, None)
+        running.discard(chat_id)
 
     # Clear queue
     for t in list(queues[chat_id]):
