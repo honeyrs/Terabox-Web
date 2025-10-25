@@ -1,13 +1,14 @@
 """
 VC Player – addons version
 Commands:
-  .play      → queue & play (reply to audio/video)
+  .play      → queue & play (reply to audio/video/document)
   .playlist  → show queue + current track
   .skip      → skip current
   .stop      → leave VC + clear everything
 """
 
 import os
+import asyncio
 from collections import defaultdict, deque
 from pyrogram.types import Message
 from . import ultroid_cmd, vcClient, getLogger
@@ -15,52 +16,56 @@ from . import ultroid_cmd, vcClient, getLogger
 log = getLogger(__name__)
 
 # ----------------------------------------------------------------------
-# py-tgcalls with Pyrogram bridge
-from pytgcalls import PyTgCalls
-from pytgcalls.mtproto.pyrogram_bridge import PyrogramBridge
-from pytgcalls.types import MediaStream, Update
+# py-tgcalls latest API
+from pytgcalls import GroupCallFactory
+from pytgcalls.mtproto_client_type import MTProtoClientType
+from pytgcalls.implementation.group_call_file import GroupCallFileAction
 
 # ----------------------------------------------------------------------
 # Global objects
-pytg = PyTgCalls(PyrogramBridge(vcClient))
+group_call_factory = GroupCallFactory(
+    vcClient, mtproto_backend=MTProtoClientType.PYROGRAM
+)
 queues: defaultdict[int, deque] = defaultdict(deque)
 current: dict[int, dict] = {}
 
 # ----------------------------------------------------------------------
-async def ensure_started():
-    """Start py‑tgcalls only once."""
-    if not pytg.is_running:
-        await pytg.start()
-
-# ----------------------------------------------------------------------
-@pytg.on_stream_end()
-async def _stream_ended(_: PyTgCalls, update: Update):
-    """Auto‑play next track when the current one ends."""
-    chat_id = update.chat_id
+async def _on_ended(chat_id: int, path: str):
+    """Clean up ended track and play next if available."""
+    try:
+        os.remove(path)
+    except Exception:
+        pass
+    current.pop(chat_id, None)
     if queues[chat_id]:
         await _play_next(chat_id)
 
 # ----------------------------------------------------------------------
 async def _play_next(chat_id: int, msg: Message | None = None):
+    """Play next track in queue."""
     if not queues[chat_id]:
-        current.pop(chat_id, None)
         return
 
     track = queues[chat_id].popleft()
-    current[chat_id] = track
+    path = track["path"]
+    title = track["title"]
 
-    try:
-        await pytg.change_stream(chat_id, MediaStream(track["path"]))
-        if msg:
-            await msg.edit(f"**Now playing:** `{track['title']}`")
-    except Exception as e:
-        log.error(f"VC play error [{chat_id}]: {e}")
-        await _play_next(chat_id, msg)          # skip broken file
-    finally:
-        try:
-            os.remove(track["path"])
-        except Exception:
-            pass
+    def ended_callback(gc):
+        loop = asyncio.get_event_loop()
+        loop.create_task(_on_ended(chat_id, path))
+
+    group_call = group_call_factory.get_file_group_call(input_filename=path)
+    group_call.set_on_action(GroupCallFileAction.PLAYOUT_ENDED, ended_callback)
+
+    current[chat_id] = {
+        "group_call": group_call,
+        "title": title,
+        "path": path,
+    }
+
+    await group_call.start(chat_id)
+    if msg:
+        await msg.edit(f"**Now playing:** `{title}`")
 
 # ----------------------------------------------------------------------
 @ultroid_cmd(pattern="play")
@@ -69,41 +74,28 @@ async def play_cmd(event: Message):
     if not reply or not (reply.audio or reply.video or reply.document):
         return await event.edit("**Reply to an audio, video, or document file!**")
 
-    await ensure_started()
     chat_id = event.chat.id
 
-    # download
+    # Download
     path = await reply.download(in_memory=False)
     if not path:
         return await event.edit("**Download failed.**")
 
+    # Title
     title = (
-        getattr(reply.audio, "title", None) or
-        getattr(reply.audio, "file_name", None) or
-        getattr(reply.video, "file_name", None) or
-        getattr(reply.document, "file_name", None) or
-        "Unknown Media"
+        getattr(reply.audio, "title", None)
+        or getattr(reply.audio, "file_name", None)
+        or getattr(reply.video, "file_name", None)
+        or getattr(reply.document, "file_name", None)
+        or "Unknown Media"
     )
 
     track = {"path": path, "title": title}
     queues[chat_id].append(track)
     await event.edit(f"**Queued:** `{title}`")
 
-    # join VC if not already there
-    if not await pytg.is_connected(chat_id):
-        try:
-            await pytg.play(chat_id, MediaStream(path))
-            current[chat_id] = track
-            await event.edit(f"**Joined VC & playing:** `{title}`")
-        except Exception as e:
-            await event.edit(f"**Join error:** `{e}`")
-            try:
-                os.remove(path)
-            except:
-                pass
-            queues[chat_id].pop()
-            return
-    elif chat_id not in current:          # VC active but nothing playing
+    # Start playing if not already
+    if chat_id not in current:
         await _play_next(chat_id, event)
 
 # ----------------------------------------------------------------------
@@ -130,13 +122,14 @@ async def skip_cmd(event: Message):
     if chat_id not in current:
         return await event.edit("**Nothing is playing.**")
 
+    curr = current[chat_id]
+    await curr["group_call"].stop()
     try:
-        os.remove(current[chat_id]["path"])
+        os.remove(curr["path"])
     except Exception:
         pass
     current.pop(chat_id, None)
 
-    await pytg.change_stream(chat_id, None)   # stop current
     await _play_next(chat_id, event)
     await event.edit("**Skipped.**")
 
@@ -145,22 +138,22 @@ async def skip_cmd(event: Message):
 async def stop_cmd(event: Message):
     chat_id = event.chat.id
 
-    if await pytg.is_connected(chat_id):
-        await pytg.leave_group_call(chat_id)
+    # Stop current
+    if chat_id in current:
+        curr = current[chat_id]
+        await curr["group_call"].leave_current_group_call()
+        try:
+            os.remove(curr["path"])
+        except Exception:
+            pass
+        current.pop(chat_id, None)
 
-    # clear queue
+    # Clear queue
     for t in list(queues[chat_id]):
         try:
             os.remove(t["path"])
         except Exception:
             pass
     queues[chat_id].clear()
-
-    if chat_id in current:
-        try:
-            os.remove(current[chat_id]["path"])
-        except Exception:
-            pass
-        current.pop(chat_id, None)
 
     await event.edit("**Stopped & cleared.**")
