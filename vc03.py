@@ -1,5 +1,5 @@
 """
-VC Player – Ultroid Addon (py-tgcalls latest - MediaStream API)
+VC Player – Ultroid Addon (py-tgcalls + Telethon MTProto)
 Commands:
   .play      → reply to audio/video/doc
   .playlist  → show queue
@@ -10,25 +10,38 @@ Commands:
 import os
 from collections import defaultdict, deque
 from pyrogram.types import Message
-from . import ultroid_cmd, vcClient, getLogger
+from . import ultroid_cmd, getLogger
 
 log = getLogger(__name__)
 
 # ----------------------------------------------------------------------
-# py-tgcalls latest – MediaStream API
-from pytgcalls import PyTgCalls
+# Telethon MTProto Client for py-tgcalls
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+from pytgcalls import PyTgCalls, idle
 from pytgcalls.types import MediaStream, Update
 
 # ----------------------------------------------------------------------
+# CONFIGURE YOUR USER SESSION HERE
+API_ID = 12345678        # ← Your API ID
+API_HASH = "your_api_hash"  # ← Your API HASH
+SESSION_STRING = "your_session_string"  # ← Get from .session command
+
+# Create MTProto client
+mtproto_client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+pytg = PyTgCalls(mtproto_client)
+
+# ----------------------------------------------------------------------
 # Global objects
-pytg = PyTgCalls(vcClient)
 queues: defaultdict[int, deque] = defaultdict(deque)
 current: dict[int, dict] = {}
 
 # ----------------------------------------------------------------------
 async def ensure_started():
     if not pytg.is_running:
+        await mtproto_client.start()
         await pytg.start()
+        log.info("py-tgcalls started with MTProto client")
 
 # ----------------------------------------------------------------------
 @pytg.on_stream_end()
@@ -46,10 +59,7 @@ async def _play_next(chat_id: int, msg: Message | None = None):
     track = queues[chat_id].popleft()
     current[chat_id] = track
 
-    stream = MediaStream(
-        track["path"],
-        video_flags=MediaStream.Flags.IGNORE  # Audio only
-    )
+    stream = MediaStream(track["path"], video_flags=MediaStream.Flags.IGNORE)
 
     try:
         await pytg.change_stream(chat_id, stream)
@@ -90,10 +100,7 @@ async def play_cmd(event: Message):
     queues[chat_id].append(track)
     await event.edit(f"**Queued:** `{title}`")
 
-    stream = MediaStream(
-        path,
-        video_flags=MediaStream.Flags.IGNORE  # Audio only
-    )
+    stream = MediaStream(path, video_flags=MediaStream.Flags.IGNORE)
 
     if not await pytg.is_connected(chat_id):
         try:
@@ -168,3 +175,7 @@ async def stop_cmd(event: Message):
         current.pop(chat_id, None)
 
     await event.edit("**Stopped & cleared.**")
+
+# ----------------------------------------------------------------------
+# Keep alive
+idle()
