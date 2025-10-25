@@ -1,5 +1,5 @@
 """
-VC Player – addons version (pytgcalls v4+)
+VC Player – pytgcalls v4+ (GitHub) – FULLY WORKING
 Commands:
   .play      → queue & play (reply to audio/video/document)
   .playlist  → show queue + current track
@@ -16,17 +16,15 @@ from . import ultroid_cmd, vcClient, getLogger
 log = getLogger(__name__)
 
 # ----------------------------------------------------------------------
-# pytgcalls v4+ API
 from pytgcalls import PyTgCalls
-from pytgcalls import StreamType
-from pytgcalls.types import AudioVideoPiped
+from pytgcalls.types import AudioPiped, HighQualityAudio
 
 # ----------------------------------------------------------------------
-# Global objects
+# Global client
 client = PyTgCalls(vcClient)
 queues: defaultdict[int, deque] = defaultdict(deque)
 current: dict[int, dict] = {}
-running: set[int] = set()  # Track active calls
+active_calls: set[int] = set()
 
 # Start the client
 asyncio.create_task(client.start())
@@ -41,15 +39,19 @@ async def _on_stream_end(chat_id: int):
         except Exception:
             pass
         current.pop(chat_id, None)
+    active_calls.discard(chat_id)
 
     if queues[chat_id]:
         await _play_next(chat_id)
     else:
-        running.discard(chat_id)
+        try:
+            await client.leave_group_call(chat_id)
+        except Exception:
+            pass
 
 # ----------------------------------------------------------------------
 async def _play_next(chat_id: int, msg: Message | None = None):
-    if chat_id in running:
+    if chat_id in active_calls:
         return  # Already playing
 
     if not queues[chat_id]:
@@ -59,69 +61,56 @@ async def _play_next(chat_id: int, msg: Message | None = None):
     path = track["path"]
     title = track["title"]
 
-    # Mark as running
-    running.add(chat_id)
-
-    # Update current
+    active_calls.add(chat_id)
     current[chat_id] = {"path": path, "title": title}
 
     try:
         await client.join_group_call(
             chat_id,
-            AudioVideoPiped(
-                path,
-                audio_parameters={
-                    "bit_rate": 48000,
-                },
-                video_parameters=None,  # Set to None if no video
-            ),
-            stream_type=StreamType().pulse_stream,
+            AudioPiped(path, HighQualityAudio()),
+            stream_type="pulse"
         )
 
         if msg:
             await msg.edit(f"**Now playing:** `{title}`")
 
-        # Wait for stream to end
-        while chat_id in current and client.is_connected(chat_id):
+        # Wait until disconnected or manually stopped
+        while chat_id in active_calls and client.is_connected(chat_id):
             await asyncio.sleep(1)
 
         await _on_stream_end(chat_id)
 
     except Exception as e:
-        log.error(f"Error playing {path}: {e}")
+        log.error(f"Play error: {e}")
         await _on_stream_end(chat_id)
         if msg:
-            await msg.edit("**Failed to play track.**")
+            await msg.edit("**Failed to play.**")
 
 # ----------------------------------------------------------------------
 @ultroid_cmd(pattern="play")
 async def play_cmd(event: Message):
     reply = event.reply_to_message
     if not reply or not (reply.audio or reply.video or reply.document):
-        return await event.edit("**Reply to an audio, video, or document file!**")
+        return await event.edit("**Reply to audio/video/document!**")
 
     chat_id = event.chat.id
 
-    # Download
     path = await reply.download(in_memory=False)
     if not path:
         return await event.edit("**Download failed.**")
 
-    # Title
     title = (
         getattr(reply.audio, "title", None)
         or getattr(reply.audio, "file_name", None)
         or getattr(reply.video, "file_name", None)
         or getattr(reply.document, "file_name", None)
-        or "Unknown Media"
+        or "Unknown"
     )
 
-    track = {"path": path, "title": title}
-    queues[chat_id].append(track)
+    queues[chat_id].append({"path": path, "title": title})
     await event.edit(f"**Queued:** `{title}`")
 
-    # Start playing if not already
-    if chat_id not in running:
+    if chat_id not in active_calls:
         asyncio.create_task(_play_next(chat_id, event))
 
 # ----------------------------------------------------------------------
@@ -146,7 +135,7 @@ async def playlist_cmd(event: Message):
 async def skip_cmd(event: Message):
     chat_id = event.chat.id
     if chat_id not in current:
-        return await event.edit("**Nothing is playing.**")
+        return await event.edit("**Nothing playing.**")
 
     try:
         await client.leave_group_call(chat_id)
@@ -160,7 +149,7 @@ async def skip_cmd(event: Message):
         pass
 
     current.pop(chat_id, None)
-    running.discard(chat_id)
+    active_calls.discard(chat_id)
 
     await event.edit("**Skipped.**")
 
@@ -172,7 +161,6 @@ async def skip_cmd(event: Message):
 async def stop_cmd(event: Message):
     chat_id = event.chat.id
 
-    # Stop current
     if chat_id in current:
         try:
             await client.leave_group_call(chat_id)
@@ -186,9 +174,8 @@ async def stop_cmd(event: Message):
             pass
 
         current.pop(chat_id, None)
-        running.discard(chat_id)
+        active_calls.discard(chat_id)
 
-    # Clear queue
     for t in list(queues[chat_id]):
         try:
             os.remove(t["path"])
