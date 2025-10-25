@@ -1,51 +1,41 @@
 """
-VC Player – Ultroid Addon (py-tgcalls + Telethon MTProto)
+VC Player – addons version
 Commands:
-  .play      → reply to audio/video/doc
-  .playlist  → show queue
+  .play      → queue & play (reply to audio/video)
+  .playlist  → show queue + current track
   .skip      → skip current
-  .stop      → leave VC + clear
+  .stop      → leave VC + clear everything
 """
 
 import os
 from collections import defaultdict, deque
 from pyrogram.types import Message
-from . import ultroid_cmd, getLogger
+from . import ultroid_cmd, vcClient, getLogger
 
 log = getLogger(__name__)
 
 # ----------------------------------------------------------------------
-# Telethon MTProto Client for py-tgcalls
-from telethon import TelegramClient
-from telethon.sessions import StringSession
-from pytgcalls import PyTgCalls, idle
+# py-tgcalls with Pyrogram bridge
+from pytgcalls import PyTgCalls
+from pytgcalls.mtproto.pyrogram_bridge import PyrogramBridge
 from pytgcalls.types import MediaStream, Update
 
 # ----------------------------------------------------------------------
-# CONFIGURE YOUR USER SESSION HERE
-API_ID = 12345678        # ← Your API ID
-API_HASH = "your_api_hash"  # ← Your API HASH
-SESSION_STRING = "your_session_string"  # ← Get from .session command
-
-# Create MTProto client
-mtproto_client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
-pytg = PyTgCalls(mtproto_client)
-
-# ----------------------------------------------------------------------
 # Global objects
+pytg = PyTgCalls(PyrogramBridge(vcClient))
 queues: defaultdict[int, deque] = defaultdict(deque)
 current: dict[int, dict] = {}
 
 # ----------------------------------------------------------------------
 async def ensure_started():
+    """Start py‑tgcalls only once."""
     if not pytg.is_running:
-        await mtproto_client.start()
         await pytg.start()
-        log.info("py-tgcalls started with MTProto client")
 
 # ----------------------------------------------------------------------
 @pytg.on_stream_end()
 async def _stream_ended(_: PyTgCalls, update: Update):
+    """Auto‑play next track when the current one ends."""
     chat_id = update.chat_id
     if queues[chat_id]:
         await _play_next(chat_id)
@@ -59,15 +49,13 @@ async def _play_next(chat_id: int, msg: Message | None = None):
     track = queues[chat_id].popleft()
     current[chat_id] = track
 
-    stream = MediaStream(track["path"], video_flags=MediaStream.Flags.IGNORE)
-
     try:
-        await pytg.change_stream(chat_id, stream)
+        await pytg.change_stream(chat_id, MediaStream(track["path"]))
         if msg:
             await msg.edit(f"**Now playing:** `{track['title']}`")
     except Exception as e:
-        log.error(f"Play error [{chat_id}]: {e}")
-        await _play_next(chat_id, msg)
+        log.error(f"VC play error [{chat_id}]: {e}")
+        await _play_next(chat_id, msg)          # skip broken file
     finally:
         try:
             os.remove(track["path"])
@@ -79,11 +67,12 @@ async def _play_next(chat_id: int, msg: Message | None = None):
 async def play_cmd(event: Message):
     reply = event.reply_to_message
     if not reply or not (reply.audio or reply.video or reply.document):
-        return await event.edit("**Reply to an audio, video, or document!**")
+        return await event.edit("**Reply to an audio, video, or document file!**")
 
     await ensure_started()
     chat_id = event.chat.id
 
+    # download
     path = await reply.download(in_memory=False)
     if not path:
         return await event.edit("**Download failed.**")
@@ -100,13 +89,12 @@ async def play_cmd(event: Message):
     queues[chat_id].append(track)
     await event.edit(f"**Queued:** `{title}`")
 
-    stream = MediaStream(path, video_flags=MediaStream.Flags.IGNORE)
-
+    # join VC if not already there
     if not await pytg.is_connected(chat_id):
         try:
-            await pytg.play(chat_id, stream)
+            await pytg.play(chat_id, MediaStream(path))
             current[chat_id] = track
-            await event.edit(f"**Joined & playing:** `{title}`")
+            await event.edit(f"**Joined VC & playing:** `{title}`")
         except Exception as e:
             await event.edit(f"**Join error:** `{e}`")
             try:
@@ -115,7 +103,7 @@ async def play_cmd(event: Message):
                 pass
             queues[chat_id].pop()
             return
-    elif chat_id not in current:
+    elif chat_id not in current:          # VC active but nothing playing
         await _play_next(chat_id, event)
 
 # ----------------------------------------------------------------------
@@ -140,15 +128,15 @@ async def playlist_cmd(event: Message):
 async def skip_cmd(event: Message):
     chat_id = event.chat.id
     if chat_id not in current:
-        return await event.edit("**Nothing playing.**")
+        return await event.edit("**Nothing is playing.**")
 
     try:
         os.remove(current[chat_id]["path"])
-    except:
+    except Exception:
         pass
     current.pop(chat_id, None)
 
-    await pytg.change_stream(chat_id, None)
+    await pytg.change_stream(chat_id, None)   # stop current
     await _play_next(chat_id, event)
     await event.edit("**Skipped.**")
 
@@ -160,22 +148,19 @@ async def stop_cmd(event: Message):
     if await pytg.is_connected(chat_id):
         await pytg.leave_group_call(chat_id)
 
+    # clear queue
     for t in list(queues[chat_id]):
         try:
             os.remove(t["path"])
-        except:
+        except Exception:
             pass
     queues[chat_id].clear()
 
     if chat_id in current:
         try:
             os.remove(current[chat_id]["path"])
-        except:
+        except Exception:
             pass
         current.pop(chat_id, None)
 
     await event.edit("**Stopped & cleared.**")
-
-# ----------------------------------------------------------------------
-# Keep alive
-idle()
