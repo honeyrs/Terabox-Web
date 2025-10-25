@@ -1,7 +1,7 @@
 """
 VC Player – addons version
 Commands:
-  .play      → queue & play (reply to audio/video)
+  .play      → queue & play (reply to audio/video/document)
   .playlist  → show queue + current track
   .skip      → skip current
   .stop      → leave VC + clear everything
@@ -10,18 +10,17 @@ Commands:
 import os
 from collections import defaultdict, deque
 from pyrogram.types import Message
-from . import ultroid_cmd, vcClient, get_logger
+from . import ultroid_cmd, vcClient, getLogger  # ← Fixed: getLogger (capital L)
 
-log = get_logger(__name__)
+log = getLogger(__name__)  # ← Use getLogger
 
 # ----------------------------------------------------------------------
-# py‑tgcalls
 from pytgcalls import PyTgCalls
 from pytgcalls.types import AudioPiped, Update
 
 # ----------------------------------------------------------------------
 # Global objects
-pytg = PyTgCalls(vcClient)  # Use vcClient (userbot session for VC)
+pytg = PyTgCalls(vcClient)  # ← vcClient (userbot for VC)
 queues: defaultdict[int, deque] = defaultdict(deque)
 current: dict[int, dict] = {}
 
