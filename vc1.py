@@ -8,7 +8,7 @@ import os
 from collections import defaultdict, deque
 from pyrogram.types import Message
 
-from utilroid import ultroid_cmd, client, get_logger
+from . import ultroid_cmd, client, get_logger
 
 log = get_logger(__name__)
 
